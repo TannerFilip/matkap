@@ -650,7 +650,8 @@ class TelegramGUI:
             elif r.status_code == 429:
                 msg_params = int(data.get("parameters")['retry_after'])
                 self.log(f"⚠️ Hit rate limit. Waiting {msg_params} seconds...")
-                time.sleep(msg_params+30) 
+                self.log(f"{data}")
+                time.sleep(msg_params+3) 
                 return 0                
             else:
                 self.log(f"⚠️ Batch forward fail (status {r.status_code}) for IDs {message_ids[0]}..{message_ids[-1]}, reason: {data}")
