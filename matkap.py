@@ -605,12 +605,12 @@ class TelegramGUI:
             self.log(f"⚠️ [Async] Failed to retrieve content for message ID {message_id}.")
 
 
-    def forward_msg(self, bot_token, from_chat_id, to_chat_id, message_id):
-        url = f"{TELEGRAM_API_URL}{bot_token}/forwardMessage"
+    def forward_msg(self, bot_token, from_chat_id, to_chat_id, message_ids):
+        url = f"{TELEGRAM_API_URL}{bot_token}/forwardMessages"
         payload = {
             "from_chat_id": from_chat_id,
             "chat_id": to_chat_id,
-            "message_id": message_id
+            "message_ids": message_ids
         }
         try:
             r = self.session.post(url, json=payload)
@@ -618,25 +618,43 @@ class TelegramGUI:
                 data = r.json()
             except Exception:
                 data = {"raw": r.text}
+
             if r.status_code == 200 and data.get("ok"):
-                self.log(f"✅ Forwarded message ID {message_id}.")
-                threading.Thread(
-                    target=self.async_save_message_content,
-                    args=(bot_token, from_chat_id, message_id),
-                    daemon=True
-                ).start()
-                return True
+                forwarded_messages = data.get("result", [])
+                success_count = len(forwarded_messages)
+                if len(message_ids) > 1:
+                    self.log(f"✅ Forwarded batch of {success_count} messages (requested {len(message_ids)}).")
+                elif success_count == 1:
+                    self.log(f"✅ Forwarded message ID {message_ids[0]}.")
+
+                successful_ids = {msg.get('forward_from_message_id') for msg in forwarded_messages if 'forward_from_message_id' in msg}
+
+                for msg_id in successful_ids:
+                    threading.Thread(
+                        target=self.async_save_message_content,
+                        args=(bot_token, from_chat_id, msg_id),
+                        daemon=True
+                    ).start()
+
+                failed_ids = [mid for mid in message_ids if mid not in successful_ids]
+                if failed_ids:
+                    log_msg = f"🚫 Within batch, {len(failed_ids)} failed/skipped"
+                    if len(failed_ids) < 10:
+                        log_msg += f": {failed_ids}"
+                    self.log(log_msg)
+                    for failed_id in failed_ids:
+                        self.failed_400_ids.append(failed_id)
+                        self.record_missing_message_id(from_chat_id, failed_id)
+                return success_count
             else:
-                if r.status_code == 400:
-                    self.failed_400_ids.append(message_id)
-                    self.record_missing_message_id(from_chat_id, message_id)
-                    self.log(f"🚫 HTTP 400 (missing) message ID {message_id}. Data: {data}")
-                else:
-                    self.log(f"⚠️ Forward fail (status {r.status_code}) ID {message_id}, reason: {data}")
-                return False
+                self.log(f"⚠️ Batch forward fail (status {r.status_code}) for IDs {message_ids[0]}..{message_ids[-1]}, reason: {data}")
+                for msg_id in message_ids:
+                    self.failed_400_ids.append(msg_id)
+                    self.record_missing_message_id(from_chat_id, msg_id)
+                return 0
         except Exception as e:
-            self.log(f"❌ Forward error ID {message_id}: {e}")
-            return False
+            self.log(f"❌ Batch forward error for IDs {message_ids[0]}..{message_ids[-1]}: {e}")
+            return 0
 
 
     def infiltration_process(self, attacker_id):
@@ -650,8 +668,8 @@ class TelegramGUI:
             if self.stop_flag:
                 self.log("⏹️ Infiltration older ID check stopped by user.")
                 return
-            success = self.forward_msg(self.bot_token, attacker_id, self.my_chat_id, test_id)
-            if success:
+            success = self.forward_msg(self.bot_token, attacker_id, self.my_chat_id, [test_id])
+            if success > 0:
                 self.log(f"✅ First older message captured! ID={test_id}")
                 found_any = True
                 break
@@ -742,6 +760,7 @@ class TelegramGUI:
             if not unseen_ranges:
                 unseen_ranges = [(start_id, max_id)] if start_id <= max_id else []
 
+            batch = []
             for a, b in unseen_ranges:
                 for msg_id in range(a, b + 1):
                     if self.stop_flag:
@@ -750,11 +769,18 @@ class TelegramGUI:
                         break
                     if msg_id in seen_ids:  # safety
                         continue
-                    ok = self.forward_msg(self.bot_token, attacker_chat_id, self.my_chat_id, msg_id)
-                    if ok:
-                        success_count += 1
+                    
+                    batch.append(msg_id)
+                    if len(batch) >= 100:
+                        success_count += self.forward_msg(self.bot_token, attacker_chat_id, self.my_chat_id, batch)
+                        batch = []
+
                 if self.stop_flag:
                     break
+            
+            if not self.stop_flag and batch:
+                success_count += self.forward_msg(self.bot_token, attacker_chat_id, self.my_chat_id, batch)
+
             if not self.stop_flag:
                 txt = f"Forwarded from ID {start_id}..{max_id}, total success: {success_count}"
                 if self.failed_400_ids:
