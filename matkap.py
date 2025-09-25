@@ -4,6 +4,7 @@ import tkinter.ttk as ttk
 import asyncio
 import os
 import threading
+import time 
 from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 from telethon import TelegramClient
@@ -646,6 +647,11 @@ class TelegramGUI:
                         self.failed_400_ids.append(failed_id)
                         self.record_missing_message_id(from_chat_id, failed_id)
                 return success_count
+            elif r.status_code == 429:
+                msg_params = int(data.get("parameters")['retry_after'])
+                self.log(f"⚠️ Hit rate limit. Waiting {msg_params} seconds...")
+                time.sleep(msg_params+30) 
+                return 0                
             else:
                 self.log(f"⚠️ Batch forward fail (status {r.status_code}) for IDs {message_ids[0]}..{message_ids[-1]}, reason: {data}")
                 for msg_id in message_ids:
@@ -669,7 +675,7 @@ class TelegramGUI:
                 self.log("⏹️ Infiltration older ID check stopped by user.")
                 return
             success = self.forward_msg(self.bot_token, attacker_id, self.my_chat_id, [test_id])
-            if success > 0:
+            if success:
                 self.log(f"✅ First older message captured! ID={test_id}")
                 found_any = True
                 break
